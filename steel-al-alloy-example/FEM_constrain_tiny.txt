@@ -1,0 +1,14 @@
+No._nodes:             3
+Nodal_coords:
+    0.0   0.0
+    1.0   0.0
+    0.0   1.0
+No._elements:                    1
+Element_connectivity:
+   1 2 3
+No._nodes_with_prescribed_DOFs:  2
+Node_# DOF# Value:
+   1 1 0.0
+   1 2 0.0
+No._elements_with_prescribed_loads: 0
+Element_# Face_# Traction_components
