@@ -1,9 +1,11 @@
+# updated Oct 22 2022
 import json
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 import numpy as np
 import torch
 import torch.nn as nn
+print(torch.cuda.is_available())
 
 infile = open('FEM_converted.json', 'r')
 var_dict = json.load(infile)
@@ -23,20 +25,12 @@ ndload = var_dict["ndload"]
 dloads = var_dict["dloads"]
 
 
-class steelAl(object):
-    def __init__(self):
-        super().__init__()
-        global nnode
-        self.stiff = torch.zeros([2 * nnode, 2 * nnode], dtype=torch.float64)
-        self.resid = torch.zeros([2 * nnode, 1], dtype=torch.float64)
-
-
 def create_Dmat(nu, E):
     out = torch.mul(E / ((1 + nu) * (1 - 2 * nu)),
                     torch.tensor([[1 - nu, nu, 0],
                                   [nu, 1 - nu, 0],
                                   [0, 0, (1 - 2 * nu) / 2]]))
-    return out.type(float)
+    return out.type(torch.float64)
 
 
 def elresid(xa, ya, xb, yb, tx, ty):
@@ -60,113 +54,40 @@ def elstiff(xa, ya, xb, yb, xc, yc, Dmat):
 
     # Return element stifffness
     out = torch.mul(torch.mm(torch.mm(torch.transpose(Bmat, 0, 1), Dmat), Bmat), area)
-    return out.type(float)
+    return out.type(torch.float64)
 
 
 # ----------Init stiff and resid----------
 
 
-class InitAll(nn.Module):
-    def __init__(self, var_dict):
-        super().__init__()
-        self.nnode = var_dict["nnode"]
-        self.xcoord = torch.from_numpy(np.asarray([i[0] for i in var_dict["coord"]]))
-        self.ycoord = torch.from_numpy(np.asarray([i[1] for i in var_dict["coord"]]))
-        self.nelem = var_dict["nelem"]
-        self.connect = var_dict["connect"]
-        self.nfix = var_dict["nfix"]
-        self.fixnodes = var_dict["fixnodes"]
-        self.ndload = var_dict["ndload"]
-        self.dloads = var_dict["dloads"]
-
-        self.steelAL = steelAl(self.nnode)
-        self.stiff = self.steelAL.stiff
-        self.resid = self.steelAL.resid
-
-    def forward(self):
-        # Young's Modulus and Poisson's Ratio for Steel
-        E_st = 200
-        nu_st = 0.3
-        # For Aluminum
-        E_al = 69
-        nu_al = 0.33
-
-        # Steel D-matrix
-        Dmat_st = create_Dmat(nu_st, E_st)
-        # Aluminum D-matrix
-        Dmat_al = create_Dmat(nu_al, E_al)
-
-        for lmn in range(self.nelem):
-            a = connect[lmn][0]
-            b = connect[lmn][1]
-            c = connect[lmn][2]
-
-            if self.elem_material[lmn] > 0.5:
-                k = elstiff(self.xcoord[a], self.ycoord[a],
-                            self.xcoord[b], self.ycoord[b],
-                            self.xcoord[c], self.ycoord[c], Dmat_al)
-            else:
-                k = elstiff(self.xcoord[a], self.ycoord[a],
-                            self.xcoord[b], self.ycoord[b],
-                            self.xcoord[c], self.ycoord[c], Dmat_st)
-
-            for i in range(3):
-                for ii in range(2):
-                    for j in range(3):
-                        for jj in range(2):
-                            rw = 2 * (self.connect[lmn][i]) + ii
-                            cl = 2 * (self.connect[lmn][j]) + jj
-                            self.stiff[rw][cl] = self.stiff[rw][cl] + k[2 * i + ii][2 * j + jj]
-
-        pointer = [1, 2, 0]
-        for i in range(self.ndload):
-            lmn = self.dloads[i][0]
-            face = self.dloads[i][1]
-            a = connect[lmn][face]
-            b = connect[lmn][pointer[face]]
-            r = elresid(self.xcoord[a], self.ycoord[a],
-                        self.xcoord[b], self.ycoord[b],
-                        self.dloads[i][2], self.dloads[i][3])
-
-            self.resid[2 * a] = self.resid[2 * a] + r[0]
-            self.resid[2 * a + 1] = self.resid[2 * a + 1] + r[1]
-            self.resid[2 * b] = self.resid[2 * b] + r[2]
-            self.resid[2 * b + 1] = self.resid[2 * b + 1] + r[3]
-
-        for i in range(self.nfix):
-            rw = 2 * (self.fixnodes[i][0]) + self.fixnodes[i][1]
-            for j in range(2 * self.nnode):
-                self.stiff[rw][j] = 0
-            self.stiff[rw][rw] = 1.0
-            self.resid[rw] = self.fixnodes[i][2]
-
-        return self.stiff, self.resid
-
-
-'''
 class SolveAll(nn.Module):
     def __init__(self, var_dict):
         super().__init__()
         self.var_dict = var_dict
         self.nnode = var_dict["nnode"]
-        self.xcoord = torch.from_numpy(np.asarray([i[0] for i in self.var_dict["coord"]]))
-        self.ycoord = torch.from_numpy(np.asarray([i[1] for i in self.var_dict["coord"]]))
+        self.xcoord = torch.tensor([i[0] for i in var_dict["coord"]], dtype=float)
+        self.ycoord = torch.tensor([i[1] for i in var_dict["coord"]], dtype=float)
         self.nelem = var_dict["nelem"]
-
         elem_material = torch.randn(self.nelem, dtype=torch.float64)
+
+        #for i in range(nelem):
+        #    elem_material[i] = -100000
+
+        #print(sigmoid(elem_material))
         self.elem_material = nn.Parameter(elem_material, requires_grad=True)
 
-        self.steelAL = steelAl(self.nnode)
-        self.stiff = self.steelAL.stiff
-        self.resid = self.steelAL.resid
+        self.u = torch.zeros([2 * nnode, 1], dtype=torch.float64)
 
-        self.net1 = CreateNet(self.var_dict, self.elem_material)
-        self.net2 = SolverNet(self.xcoord, self.ycoord)
+        self.net = nn.Sequential(CreateNet(self.var_dict, self.elem_material),
+                SolverNet(self.xcoord, self.ycoord))
+
 
     def forward(self):
-        self.stiff, self.resid, out = self.net1()
-        u, uxcoord, uycoord = self.net2()
-        return u, uxcoord, uycoord, sigmoid(self.elem_material), stiff
+
+        resid = torch.zeros([2 * nnode, 1], dtype=torch.float64)
+        self.u, uxcoord, uycoord = self.net(resid)
+        material = sigmoid(self.elem_material)
+        return self.u, uxcoord, uycoord, material
 
 
 # ----------Step 1----------
@@ -188,7 +109,8 @@ class CreateNet(nn.Module):
 
         self.net = AssembleStiff(self.var_dict, self.elem_material)
 
-    def forward(self):
+    def forward(self, resid):
+        #print(self.elem_material[25])
         stiff = self.net()
 
         pointer = [1, 2, 0]
@@ -212,7 +134,7 @@ class CreateNet(nn.Module):
             stiff[rw][rw] = 1.0
             resid[rw] = self.fixnodes[i][2]
 
-        return stiff, resid, self.elem_material
+        return torch.cat([stiff, resid], dim=1)
 
 
 class AssembleStiff(nn.Module):
@@ -220,16 +142,14 @@ class AssembleStiff(nn.Module):
         super().__init__()
         self.var_dict = var_dict
         self.nnode = var_dict["nnode"]
-        self.xcoord = torch.from_numpy(np.asarray([i[0] for i in self.var_dict["coord"]]))
-        self.ycoord = torch.from_numpy(np.asarray([i[1] for i in self.var_dict["coord"]]))
+        self.xcoord = torch.tensor([i[0] for i in var_dict["coord"]], dtype=float)
+        self.ycoord = torch.tensor([i[1] for i in var_dict["coord"]], dtype=float)
         self.nelem = var_dict["nelem"]
         self.connect = var_dict["connect"]
 
-        sigmoid = nn.Sigmoid()
-        self.elem_material = sigmoid(elem_material)
+        self.elem_material = elem_material
 
-        # self.stiff = torch.zeros([2 * self.nnode, 2 * self.nnode], dtype=torch.float64)
-        print(self.elem_material[1])
+
         # Young's Modulus and Poisson's Ratio for Steel
         E_st = 200
         nu_st = 0.3
@@ -242,70 +162,69 @@ class AssembleStiff(nn.Module):
         # Aluminum D-matrix
         self.Dmat_al = create_Dmat(nu_al, E_al)
 
-        # Mixed D-matrix
-        self.Dmat = torch.zeros([3, 3, self.nelem], dtype=torch.float64)
-        for i in range(self.nelem):
-            self.Dmat[:, :, i] = torch.mul(self.Dmat_al, self.elem_material[i]) + torch.mul(self.Dmat_st,
-                                                                                            (1 - self.elem_material[i]))
-
         layers = []
         for i in range(self.nelem):
-            layers.append(ElstiffLayer(self.connect, i, self.xcoord, self.ycoord, self.Dmat))
+            layers.append(ElstiffLayer(self.connect, i, self.xcoord, self.ycoord, self.Dmat_st, self.Dmat_al, self.elem_material))
 
         self.layers = nn.Sequential(*layers)
 
     def forward(self):
-        global stiff, resid
-
-        input = stiff
-        out = self.layers(input)
-
+        stiff = torch.zeros([2 * nnode, 2 * nnode], dtype=torch.float64)
+        out = self.layers(stiff)
         return out
 
 
 class ElstiffLayer(nn.Module):
-    def __init__(self, connect, lmn, xcoord, ycoord, Dmat_st, Dmat_al):
+    def __init__(self, connect, lmn, xcoord, ycoord, Dmat_st, Dmat_al, elem_material):
         super().__init__()
-        a = connect[lmn][0]
-        b = connect[lmn][1]
-        c = connect[lmn][2]
+        self.lmn = lmn
+        self.a = connect[self.lmn][0]
+        self.b = connect[self.lmn][1]
+        self.c = connect[self.lmn][2]
+        self.xcoord = xcoord
+        self.ycoord = ycoord
         self.Dmat_st = Dmat_st
         self.Dmat_al = Dmat_al
-        self.Dmat =
 
-        self.indicator = torch.tensor([2 * a, 2 * a + 1, 2 * b, 2 * b + 1, 2 * c, 2 * c + 1])
-        self.elstiff = elstiff(xcoord[a], ycoord[a], xcoord[b], ycoord[b], xcoord[c], ycoord[c], self.Dmat)
+        self.elem_material = elem_material
+
+        self.indicator = torch.tensor([2 * self.a, 2 * self.a + 1, 2 * self.b, 2 * self.b + 1, 2 * self.c, 2 * self.c + 1])
 
     def forward(self, stiff):
+        #with torch.no_grad():
+        elem_m = sigmoid(self.elem_material)
+        Dmat = torch.mul(self.Dmat_al, elem_m[self.lmn]) + torch.mul(self.Dmat_st, (1 - elem_m[self.lmn]))
+        estiff = elstiff(self.xcoord[self.a], self.ycoord[self.a], self.xcoord[self.b], self.ycoord[self.b], self.xcoord[self.c], self.ycoord[self.c], Dmat)
         for j in range(6):
             for k in range(6):
-                stiff[self.indicator[j], self.indicator[k]] = stiff[self.indicator[j], self.indicator[k]] + \
-                                                              self.elstiff[j, k]
+                stiff[self.indicator[j], self.indicator[k]] = stiff[self.indicator[j], self.indicator[k]] + estiff[j, k]
 
         return stiff
-'''
 
 
 # ----------Step 2----------
 
 
 class SolverNet(nn.Module):
-    def __init__(self, stiff, resid, xcoord, ycoord):
+    def __init__(self, xcoord, ycoord):
         super().__init__()
-        self.resid = resid
-        self.stiff = stiff
         self.xcoord = xcoord
         self.ycoord = ycoord
 
         self.net = CustomModule()
 
-    def forward(self):
-        torch.split()
-        out = self.net()
-        result, stiff = out.spilt(1, 2)
+    def forward(self, x):
+        stiff, resid = x.split(2 * nnode, 1)
+        u = torch.zeros([2 * nnode, 1], dtype=torch.float64)
+        r = resid - torch.mm(stiff, u)
+
+        out = self.net(u, r, stiff)
+        result, temp = out.split(1, 2)
         r = result[:, 0]
         u = result[:, 1]
         p = result[:, 2]
+
+        u = torch.reshape(u, [2 * nnode, 1])
 
         uxcoord = [0] * nnode
         uycoord = [0] * nnode
@@ -317,12 +236,8 @@ class SolverNet(nn.Module):
 
 
 class CustomModule(nn.Module):
-    def __init__(self, resid, stiff):
+    def __init__(self):
         super().__init__()
-        self.stiff = stiff
-        self.resid = resid
-        self.u = torch.zeros([2 * nnode, 1], dtype=torch.float64)
-        self.r = resid - torch.mm(stiff, self.u)
 
         layers = []
         for i in range(2 * nnode):
@@ -330,12 +245,14 @@ class CustomModule(nn.Module):
 
         self.layers = nn.Sequential(*layers)
 
-    def forward(self):
+    def forward(self, u, r, stiff):
+        u = torch.reshape(u, (2 * nnode, 1, 1))
+        r = torch.reshape(r, (2 * nnode, 1, 1))
         input = torch.zeros([2 * nnode, 2 * nnode, 2], dtype=torch.float64)
-        input[:, 0, 0] = self.r
-        input[:, 1, 0] = self.u
-        input[:, 2, 0] = self.r
-        input[:, :, 1] = self.stiff
+        input[:, 0, 0] = r[:, 0, 0]
+        input[:, 1, 0] = u[:, 0, 0]
+        input[:, 2, 0] = r[:, 0, 0]
+        input[:, :, 1] = stiff
         out = self.layers(input)
         return out
 
@@ -345,8 +262,8 @@ class CustomLayer(nn.Module):
         super().__init__()
 
     def forward(self, x):
-        torch.split()
-        input, stiff = x.spilt(1, 2)
+        input, stiff = x.split(1, 2)
+        stiff = torch.reshape(stiff, (2 * nnode, 2 * nnode))
         r = input[:, 0]
         u = input[:, 1]
         p = input[:, 2]
@@ -359,126 +276,94 @@ class CustomLayer(nn.Module):
         r = r_new
 
         out = torch.zeros([2 * nnode, 2 * nnode, 2], dtype=torch.float64)
-        out[:, 0, 0] = r
-        out[:, 1, 0] = u
-        out[:, 2, 0] = p
+        out[:, 0, 0] = r[:, 0]
+        out[:, 1, 0] = u[:, 0]
+        out[:, 2, 0] = p[:, 0]
         out[:, :, 1] = stiff
         return out
 
 
-'''
-class SolverNet(nn.Module):
-    def __init__(self, nnode, stiff, resid, xcoord, ycoord):
-        super().__init__()
-        self.inverse = None
-        self.u = None
-        self.size_in = 2 * nnode
-        self.size_out = 2 * nnode
-        self.nnode = nnode
-        self.xcoord = xcoord
-        self.ycoord = ycoord
-        weights = torch.tensor(stiff)
-        self.resid = torch.tensor(resid)
-        self.weights = nn.Parameter(weights, requires_grad=True)
-
-    def forward(self):
-        self.inverse = torch.linalg.inv(self.weights)
-        self.u = torch.matmul(self.inverse, self.resid)
-        uxcoord = [0] * nnode
-        uycoord = [0] * nnode
-        for i in range(self.nnode):
-            with torch.no_grad():
-                uxcoord[i] = self.xcoord[i] + self.u[2 * i]
-                uycoord[i] = self.ycoord[i] + self.u[2 * i + 1]
-        return self.u, self.inverse, uxcoord, uycoord
+# ----------Init the net----------
 
 
-def backward(u, resid, stiff):
-    inverse = torch.linalg.inv(torch.tensor(stiff))
-    loss_fn = nn.MSELoss()
-    target = torch.zeros(2 * nnode)
-    loss = loss_fn(u.float(), target.float())
-    #grad_1 = torch.autograd.grad(loss, u, grad_outputs=torch.zeros_like(u))
-    grad_2 = torch.zeros(2 * nnode, 2 * nnode)
-    for i in range(2 * nnode):
-        grad_2[i, :] = torch.tensor(resid)
-    grad_3 = torch.kron(torch.mul(inverse, -1), torch.transpose(inverse, 0, 1))
-    return torch.matmul(grad_2, grad_3)
-'''
-net_init = initAll(var_dict)
-st, rs = net_init()
-net_solve = SolveAll(var_dict)
-u, uxcoord, uycoord, elem_material, stiff = net_solve()
-'''
-resid = torch.reshape(torch.tensor(resid), (resid.size, 1))
-stiff = torch.tensor(stiff)
-print(resid.shape)
-print(stiff.shape)
-print(torch.norm(resid, p=2, dim=0))
-print(torch.matmul(torch.transpose(resid, 0, 1), resid))
+net = SolveAll(var_dict)
+u, uxcoord, uycoord, elem_material = net()
 
-net_solve = SolverNet(stiff, resid, xcoord, ycoord)
-u, uxcoord, uycoord, temp = net_solve()
-'''
 
-# print部分，勿动
-# print(elem_material)
-# print(stiff)
+# ----------Plotting----------
+
+
 facecolors = [0] * nelem
 
 for lmn in range(nelem):
-    if elem_material[lmn] > 0.5:
-        facecolors[lmn] = 1
-    else:
-        facecolors[lmn] = 0
+    facecolors[lmn] = elem_material[lmn].detach().numpy()
 
 fig, ax = plt.subplots()
 triang = mtri.Triangulation(xcoord, ycoord, connect)
 triang_2 = mtri.Triangulation(uxcoord, uycoord, connect)
-plt.tripcolor(triang, ax, facecolors=facecolors, edgecolors='green', linewidth=2, cmap='Greys', alpha=0.5)
+plt.tripcolor(triang, ax, facecolors=[0] * nelem, edgecolors='green', linewidth=2, cmap='Greys', alpha=0.5)
 plt.tripcolor(triang_2, ax, facecolors=facecolors, edgecolors='red', linewidth=2, cmap='Greys', alpha=0.5)
 plt.show()
+
 
 # ----------Training Process----------
 
 
-num_epochs = 3
-learning_rate = 0.001
+num_epochs = 50
+learning_rate = 1000
 loss_fn = nn.MSELoss()
-optimizer = torch.optim.SGD(net_solve.parameters(), lr=learning_rate)
+optimizer = torch.optim.SGD(net.parameters(), lr=learning_rate)
 
 target = torch.zeros([2 * nnode, 1], dtype=torch.float64)
+target_2 = torch.ones([nelem, 1], dtype=torch.float64)
 
+loss_old = 1000
 for epoch in range(num_epochs):
-    if epoch > 2:
-        learning_rate = 50
+    if epoch > 25:
+        learning_rate = 500
 
     for param_group in optimizer.param_groups:
         param_group["lr"] = learning_rate
 
-    u, uxcoord, uycoord, temp, tempii = net_solve()
+    u, uxcoord, uycoord, material_1 = net()
 
-    loss = loss_fn(u, target)
-    print(loss)
-    if loss < 0.001:
+    loss = 10 * loss_fn(u, target) + loss_fn(material_1, target_2)
+    print('epoch =', epoch, '; loss =', loss.detach().numpy())
+
+    if loss_old - loss < 0.00001:
         break
+
     optimizer.zero_grad()
     loss.backward(retain_graph=True)
     optimizer.step()
 
-u, uxcoord, uycoord, elem_materialii, stiffii = net_solve()
+    if epoch % 5 == 0:
+        for lmn in range(nelem):
+            facecolors[lmn] = material_1[lmn].detach().numpy()
 
-facecolorsii = [0] * nelem
+        fig, ax = plt.subplots()
+        triang = mtri.Triangulation(xcoord, ycoord, connect)
+        triang_2 = mtri.Triangulation(uxcoord, uycoord, connect)
+        #plt.tripcolor(triang, ax, facecolors=[0] * nelem, edgecolors='green', linewidth=2, cmap='Greys', alpha=0.5)
+        plt.tripcolor(triang_2, ax, facecolors=facecolors, edgecolors='red', linewidth=2, cmap='Greys', alpha=0.5)
+        plt.show()
+
+    loss_old = loss
+
+
+u, uxcoord, uycoord, material_2 = net()
+
+facecolors_2 = [0] * nelem
 
 for lmn in range(nelem):
-    if elem_materialii[lmn] > 0.5:
-        facecolorsii[lmn] = 1
+    if material_2[lmn] > 0.5:
+        facecolors_2[lmn] = 1
     else:
-        facecolorsii[lmn] = 0
+        facecolors_2[lmn] = 0
 
 fig, ax = plt.subplots()
 triang = mtri.Triangulation(xcoord, ycoord, connect)
 triang_2 = mtri.Triangulation(uxcoord, uycoord, connect)
-plt.tripcolor(triang, ax, facecolors=facecolorsii, edgecolors='green', linewidth=2, cmap='Greys', alpha=0.5)
-plt.tripcolor(triang_2, ax, facecolors=facecolorsii, edgecolors='red', linewidth=2, cmap='Greys', alpha=0.5)
+plt.tripcolor(triang, ax, facecolors=facecolors_2, edgecolors='green', linewidth=2, cmap='Greys', alpha=0.5)
+plt.tripcolor(triang_2, ax, facecolors=facecolors_2, edgecolors='red', linewidth=2, cmap='Greys', alpha=0.5)
 plt.show()
