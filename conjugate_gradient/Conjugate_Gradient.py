@@ -1,4 +1,5 @@
 # updated Oct 22 2022
+# 1 -- Al, 0 -- Steel
 import json
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
@@ -70,10 +71,6 @@ class SolveAll(nn.Module):
         self.nelem = var_dict["nelem"]
         elem_material = torch.randn(self.nelem, dtype=torch.float64)
 
-        #for i in range(nelem):
-        #    elem_material[i] = -100000
-
-        #print(sigmoid(elem_material))
         self.elem_material = nn.Parameter(elem_material, requires_grad=True)
 
         self.u = torch.zeros([2 * nnode, 1], dtype=torch.float64)
@@ -83,11 +80,13 @@ class SolveAll(nn.Module):
 
 
     def forward(self):
-
         resid = torch.zeros([2 * nnode, 1], dtype=torch.float64)
         self.u, uxcoord, uycoord = self.net(resid)
         material = sigmoid(self.elem_material)
-        return self.u, uxcoord, uycoord, material
+        material_reshape = torch.reshape(material, [nelem, 1])
+        temp = torch.ones([1, nelem], dtype=torch.float64)
+        sum = torch.reshape(torch.mm(temp, material_reshape), [1, 1])
+        return self.u, uxcoord, uycoord, material, sum
 
 
 # ----------Step 1----------
@@ -287,7 +286,7 @@ class CustomLayer(nn.Module):
 
 
 net = SolveAll(var_dict)
-u, uxcoord, uycoord, elem_material = net()
+u, uxcoord, uycoord, elem_material, temp = net()
 
 
 # ----------Plotting----------
@@ -310,28 +309,34 @@ plt.show()
 
 
 num_epochs = 50
-learning_rate = 1000
+learning_rate = 20
 loss_fn = nn.MSELoss()
 optimizer = torch.optim.SGD(net.parameters(), lr=learning_rate)
 
 target = torch.zeros([2 * nnode, 1], dtype=torch.float64)
 target_2 = torch.ones([nelem, 1], dtype=torch.float64)
 
+limit = torch.reshape(torch.tensor(0.4 * nelem, dtype=torch.float64), [1, 1])
+print(limit.detach().numpy())
+
 loss_old = 1000
+x = 10
+y = 0.01
 for epoch in range(num_epochs):
-    if epoch > 25:
-        learning_rate = 500
+    if epoch > 6:
+        learning_rate = 50
+        x = 1000
 
     for param_group in optimizer.param_groups:
         param_group["lr"] = learning_rate
 
-    u, uxcoord, uycoord, material_1 = net()
+    u, uxcoord, uycoord, material_1, sum = net()
 
-    loss = 10 * loss_fn(u, target) + loss_fn(material_1, target_2)
-    print('epoch =', epoch, '; loss =', loss.detach().numpy())
+    loss = x * loss_fn(u, target) + y * loss_fn(sum, limit)
+    print('epoch =', epoch, 'sum =', sum.detach().numpy(), '; loss =', loss.detach().numpy())
 
-    if loss_old - loss < 0.00001:
-        break
+    #if loss_old - loss < 0.00001:
+        #break
 
     optimizer.zero_grad()
     loss.backward(retain_graph=True)
@@ -351,7 +356,7 @@ for epoch in range(num_epochs):
     loss_old = loss
 
 
-u, uxcoord, uycoord, material_2 = net()
+u, uxcoord, uycoord, material_2, temp_2 = net()
 
 facecolors_2 = [0] * nelem
 
