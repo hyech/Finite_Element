@@ -1,4 +1,4 @@
-# updated Oct 22 2022
+# updated Nov 10 2022
 # 1 -- Al, 0 -- Steel
 import json
 import matplotlib.pyplot as plt
@@ -6,7 +6,11 @@ import matplotlib.tri as mtri
 import numpy as np
 import torch
 import torch.nn as nn
-print(torch.cuda.is_available())
+print("gpu device name: {}".format(torch.cuda.get_device_name(torch.device("cuda:0"))))
+device = torch.device("cpu")
+if torch.cuda.is_available():
+    torch.cuda.device('cuda')
+    device = torch.device("cuda")
 
 infile = open('FEM_converted.json', 'r')
 var_dict = json.load(infile)
@@ -16,8 +20,8 @@ sigmoid = nn.Sigmoid()
 
 global nnode
 nnode = var_dict["nnode"]
-xcoord = torch.tensor([i[0] for i in var_dict["coord"]], dtype=float)
-ycoord = torch.tensor([i[1] for i in var_dict["coord"]], dtype=float)
+xcoord = torch.tensor([i[0] for i in var_dict["coord"]], dtype=float, device=device)
+ycoord = torch.tensor([i[1] for i in var_dict["coord"]], dtype=float, device=device)
 nelem = var_dict["nelem"]
 connect = var_dict["connect"]
 nfix = var_dict["nfix"]
@@ -31,13 +35,16 @@ def create_Dmat(nu, E):
                     torch.tensor([[1 - nu, nu, 0],
                                   [nu, 1 - nu, 0],
                                   [0, 0, (1 - 2 * nu) / 2]]))
-    return out.type(torch.float64)
 
+    out = out.type(torch.float64)
+    return out.cuda()
 
 def elresid(xa, ya, xb, yb, tx, ty):
     length = torch.sqrt((xa - xb) * (xa - xb) + (ya - yb) * (ya - yb))
-    out = torch.mul(torch.tensor([tx, ty, tx, ty]), length / 2)
-    return out
+
+    out = torch.mul(torch.tensor([tx, ty, tx, ty], device=device), length / 2)
+    return out.cuda()
+
 
 
 def elstiff(xa, ya, xb, yb, xc, yc, Dmat):
@@ -51,11 +58,13 @@ def elstiff(xa, ya, xb, yb, xc, yc, Dmat):
     area = (1 / 2) * torch.abs((xb - xa) * (yc - ya) - (xc - xa) * (yb - ya))
     Bmat = torch.tensor([[nax, 0, nbx, 0, ncx, 0],
                          [0, nay, 0, nby, 0, ncy],
-                         [nay, nax, nby, nbx, ncy, ncx]])
+                         [nay, nax, nby, nbx, ncy, ncx]], device=device)
 
     # Return element stifffness
     out = torch.mul(torch.mm(torch.mm(torch.transpose(Bmat, 0, 1), Dmat), Bmat), area)
-    return out.type(torch.float64)
+    out = out.type(torch.float64)
+    return out.cuda()
+
 
 
 # ----------Init stiff and resid----------
@@ -66,26 +75,29 @@ class SolveAll(nn.Module):
         super().__init__()
         self.var_dict = var_dict
         self.nnode = var_dict["nnode"]
-        self.xcoord = torch.tensor([i[0] for i in var_dict["coord"]], dtype=float)
-        self.ycoord = torch.tensor([i[1] for i in var_dict["coord"]], dtype=float)
+        self.xcoord = torch.tensor([i[0] for i in var_dict["coord"]], dtype=float, device=device)
+        self.ycoord = torch.tensor([i[1] for i in var_dict["coord"]], dtype=float, device=device)
         self.nelem = var_dict["nelem"]
-        elem_material = torch.randn(self.nelem, dtype=torch.float64)
+        elem_material = torch.randn(self.nelem, dtype=torch.float64, device=device)
 
         self.elem_material = nn.Parameter(elem_material, requires_grad=True)
 
-        self.u = torch.zeros([2 * nnode, 1], dtype=torch.float64)
+        self.u = torch.zeros([2 * nnode, 1], dtype=torch.float64, device=device)
 
         self.net = nn.Sequential(CreateNet(self.var_dict, self.elem_material),
                 SolverNet(self.xcoord, self.ycoord))
 
 
     def forward(self):
-        resid = torch.zeros([2 * nnode, 1], dtype=torch.float64)
+        resid = torch.zeros([2 * nnode, 1], dtype=torch.float64, device=device)
+
         self.u, uxcoord, uycoord = self.net(resid)
         material = sigmoid(self.elem_material)
         material_reshape = torch.reshape(material, [nelem, 1])
         temp = torch.ones([1, nelem], dtype=torch.float64)
-        sum = torch.reshape(torch.mm(temp, material_reshape), [1, 1])
+        #sum = torch.reshape(torch.mm(temp, material_reshape), [1, 1])
+        sum = torch.mm(temp, material_reshape)
+
         return self.u, uxcoord, uycoord, material, sum
 
 
@@ -98,13 +110,16 @@ class CreateNet(nn.Module):
         self.var_dict = var_dict
         self.elem_material = elem_material
         self.nnode = self.var_dict["nnode"]
-        self.xcoord = torch.from_numpy(np.asarray([i[0] for i in self.var_dict["coord"]]))
-        self.ycoord = torch.from_numpy(np.asarray([i[1] for i in self.var_dict["coord"]]))
+        self.xcoord = torch.tensor([i[0] for i in var_dict["coord"]], dtype=float, device=device)
+        self.ycoord = torch.tensor([i[1] for i in var_dict["coord"]], dtype=float, device=device)
+
         self.connect = self.var_dict["connect"]
         self.nfix = self.var_dict["nfix"]
         self.fixnodes = self.var_dict["fixnodes"]
         self.ndload = var_dict["ndload"]
-        self.dloads = self.var_dict["dloads"]
+        self.dloads = torch.tensor(self.var_dict["dloads"], device=device)
+        print(self.dloads.shape)
+
 
         self.net = AssembleStiff(self.var_dict, self.elem_material)
 
@@ -114,8 +129,9 @@ class CreateNet(nn.Module):
 
         pointer = [1, 2, 0]
         for i in range(self.ndload):
-            lmn = self.dloads[i][0]
-            face = self.dloads[i][1]
+            lmn = int(self.dloads[i][0])
+            face = int(self.dloads[i][1])
+
             a = self.connect[lmn][face]
             b = self.connect[lmn][pointer[face]]
             r = elresid(self.xcoord[a], self.ycoord[a], self.xcoord[b], self.ycoord[b], self.dloads[i][2],
@@ -141,8 +157,9 @@ class AssembleStiff(nn.Module):
         super().__init__()
         self.var_dict = var_dict
         self.nnode = var_dict["nnode"]
-        self.xcoord = torch.tensor([i[0] for i in var_dict["coord"]], dtype=float)
-        self.ycoord = torch.tensor([i[1] for i in var_dict["coord"]], dtype=float)
+        self.xcoord = torch.tensor([i[0] for i in var_dict["coord"]], dtype=float, device=device)
+        self.ycoord = torch.tensor([i[1] for i in var_dict["coord"]], dtype=float, device=device)
+
         self.nelem = var_dict["nelem"]
         self.connect = var_dict["connect"]
 
@@ -168,7 +185,8 @@ class AssembleStiff(nn.Module):
         self.layers = nn.Sequential(*layers)
 
     def forward(self):
-        stiff = torch.zeros([2 * nnode, 2 * nnode], dtype=torch.float64)
+        stiff = torch.zeros([2 * nnode, 2 * nnode], dtype=torch.float64, device=device)
+
         out = self.layers(stiff)
         return out
 
@@ -214,7 +232,8 @@ class SolverNet(nn.Module):
 
     def forward(self, x):
         stiff, resid = x.split(2 * nnode, 1)
-        u = torch.zeros([2 * nnode, 1], dtype=torch.float64)
+        u = torch.zeros([2 * nnode, 1], dtype=torch.float64, device=device)
+
         r = resid - torch.mm(stiff, u)
 
         out = self.net(u, r, stiff)
@@ -247,7 +266,8 @@ class CustomModule(nn.Module):
     def forward(self, u, r, stiff):
         u = torch.reshape(u, (2 * nnode, 1, 1))
         r = torch.reshape(r, (2 * nnode, 1, 1))
-        input = torch.zeros([2 * nnode, 2 * nnode, 2], dtype=torch.float64)
+        input = torch.zeros([2 * nnode, 2 * nnode, 2], dtype=torch.float64, device=device)
+
         input[:, 0, 0] = r[:, 0, 0]
         input[:, 1, 0] = u[:, 0, 0]
         input[:, 2, 0] = r[:, 0, 0]
@@ -274,7 +294,8 @@ class CustomLayer(nn.Module):
         p = r_new + torch.mul(beta, p)
         r = r_new
 
-        out = torch.zeros([2 * nnode, 2 * nnode, 2], dtype=torch.float64)
+        out = torch.zeros([2 * nnode, 2 * nnode, 2], dtype=torch.float64, device=device)
+
         out[:, 0, 0] = r[:, 0]
         out[:, 1, 0] = u[:, 0]
         out[:, 2, 0] = p[:, 0]
@@ -286,22 +307,27 @@ class CustomLayer(nn.Module):
 
 
 net = SolveAll(var_dict)
-u, uxcoord, uycoord, elem_material, temp = net()
+u, uxcoord, uycoord, elem_material, sum = net()
+
 
 
 # ----------Plotting----------
 
 
-facecolors = [0] * nelem
+facecolors = np.zeros([nelem])
+
 
 for lmn in range(nelem):
     facecolors[lmn] = elem_material[lmn].detach().numpy()
 
+
 fig, ax = plt.subplots()
 triang = mtri.Triangulation(xcoord, ycoord, connect)
 triang_2 = mtri.Triangulation(uxcoord, uycoord, connect)
-plt.tripcolor(triang, ax, facecolors=[0] * nelem, edgecolors='green', linewidth=2, cmap='Greys', alpha=0.5)
+plt.tripcolor(triang, ax, facecolors=np.zeros([nelem]), edgecolors='green', linewidth=2, cmap='Greys', alpha=0.5)
 plt.tripcolor(triang_2, ax, facecolors=facecolors, edgecolors='red', linewidth=2, cmap='Greys', alpha=0.5)
+print('a')
+
 plt.show()
 
 
@@ -309,40 +335,60 @@ plt.show()
 
 
 num_epochs = 50
-learning_rate = 20
+num_iteration = 5
+
+learning_rate_1 = 100
+learning_rate_2 = 0.001
 loss_fn = nn.MSELoss()
-optimizer = torch.optim.SGD(net.parameters(), lr=learning_rate)
+loss_fn = loss_fn.cuda()
 
-target = torch.zeros([2 * nnode, 1], dtype=torch.float64)
-target_2 = torch.ones([nelem, 1], dtype=torch.float64)
+optimizer_1 = torch.optim.SGD(net.parameters(), lr=learning_rate_1)
+#optimizer_2 = torch.optim.SGD(net.parameters(), lr=learning_rate_2)
 
-limit = torch.reshape(torch.tensor(0.4 * nelem, dtype=torch.float64), [1, 1])
-print(limit.detach().numpy())
+
+target = torch.zeros([2 * nnode, 1], dtype=torch.float64, device=device)
+target_2 = torch.ones([nelem, 1], dtype=torch.float64, device=device)
+
+#limit = torch.reshape(torch.tensor(0.4 * nelem, dtype=torch.float64), [1, 1])
+limit = 0.4 * nelem
+print('budget =', limit)
 
 loss_old = 1000
-x = 10
-y = 0.01
+x = 100
+alpha = 0.01
+
 for epoch in range(num_epochs):
-    if epoch > 6:
-        learning_rate = 50
-        x = 1000
+    if torch.abs(sum - limit) < 1:
+        learning_rate_1 = 1000
+        x = 10000
+        learning_rate_2 = 0.0001
 
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = learning_rate
+    for param_group in optimizer_1.param_groups:
+        param_group["lr"] = learning_rate_1
 
-    u, uxcoord, uycoord, material_1, sum = net()
+    for iter in range(num_iteration):
+        u, uxcoord, uycoord, material_1, sum = net()
+        if sum - limit > 0:
+            loss_1 = x * loss_fn(u, target) + alpha * (sum - limit)
+        else:
+            loss_1 = x * loss_fn(u, target) - alpha * (sum - limit)
 
-    loss = x * loss_fn(u, target) + y * loss_fn(sum, limit)
-    print('epoch =', epoch, 'sum =', sum.detach().numpy(), '; loss =', loss.detach().numpy())
+        #if loss_old - loss_1 < 0.00001:
+           #break
 
-    #if loss_old - loss < 0.00001:
-        #break
+        optimizer_1.zero_grad()
+        loss_1.backward(retain_graph=True)
+        optimizer_1.step()
 
-    optimizer.zero_grad()
-    loss.backward(retain_graph=True)
-    optimizer.step()
+    alpha = alpha - learning_rate_2 * (sum - limit)
 
-    if epoch % 5 == 0:
+    #inside loop: optimized for loss1 + y * loss2
+    #outside loop: optimized for y
+
+    print('epoch =', epoch, '; sum =', sum[0, 0].detach().numpy(), '; loss =', loss_1[0, 0].detach().numpy(), '; alpha =', alpha[0, 0].detach().numpy())
+
+    if epoch % 1 == 0:
+
         for lmn in range(nelem):
             facecolors[lmn] = material_1[lmn].detach().numpy()
 
@@ -353,12 +399,14 @@ for epoch in range(num_epochs):
         plt.tripcolor(triang_2, ax, facecolors=facecolors, edgecolors='red', linewidth=2, cmap='Greys', alpha=0.5)
         plt.show()
 
-    loss_old = loss
+    loss_old = loss_1
+
 
 
 u, uxcoord, uycoord, material_2, temp_2 = net()
 
-facecolors_2 = [0] * nelem
+facecolors_2 = np.zeros([nelem])
+
 
 for lmn in range(nelem):
     if material_2[lmn] > 0.5:
@@ -372,3 +420,4 @@ triang_2 = mtri.Triangulation(uxcoord, uycoord, connect)
 plt.tripcolor(triang, ax, facecolors=facecolors_2, edgecolors='green', linewidth=2, cmap='Greys', alpha=0.5)
 plt.tripcolor(triang_2, ax, facecolors=facecolors_2, edgecolors='red', linewidth=2, cmap='Greys', alpha=0.5)
 plt.show()
+
