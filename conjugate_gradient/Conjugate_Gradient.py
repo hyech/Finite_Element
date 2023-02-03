@@ -35,14 +35,16 @@ def create_Dmat(nu, E):
                     torch.tensor([[1 - nu, nu, 0],
                                   [nu, 1 - nu, 0],
                                   [0, 0, (1 - 2 * nu) / 2]]))
+
     out = out.type(torch.float64)
     return out.cuda()
 
-
 def elresid(xa, ya, xb, yb, tx, ty):
     length = torch.sqrt((xa - xb) * (xa - xb) + (ya - yb) * (ya - yb))
+
     out = torch.mul(torch.tensor([tx, ty, tx, ty], device=device), length / 2)
     return out.cuda()
+
 
 
 def elstiff(xa, ya, xb, yb, xc, yc, Dmat):
@@ -62,6 +64,7 @@ def elstiff(xa, ya, xb, yb, xc, yc, Dmat):
     out = torch.mul(torch.mm(torch.mm(torch.transpose(Bmat, 0, 1), Dmat), Bmat), area)
     out = out.type(torch.float64)
     return out.cuda()
+
 
 
 # ----------Init stiff and resid----------
@@ -87,12 +90,14 @@ class SolveAll(nn.Module):
 
     def forward(self):
         resid = torch.zeros([2 * nnode, 1], dtype=torch.float64, device=device)
+
         self.u, uxcoord, uycoord = self.net(resid)
         material = sigmoid(self.elem_material)
         material_reshape = torch.reshape(material, [nelem, 1])
         temp = torch.ones([1, nelem], dtype=torch.float64)
         #sum = torch.reshape(torch.mm(temp, material_reshape), [1, 1])
         sum = torch.mm(temp, material_reshape)
+
         return self.u, uxcoord, uycoord, material, sum
 
 
@@ -107,12 +112,14 @@ class CreateNet(nn.Module):
         self.nnode = self.var_dict["nnode"]
         self.xcoord = torch.tensor([i[0] for i in var_dict["coord"]], dtype=float, device=device)
         self.ycoord = torch.tensor([i[1] for i in var_dict["coord"]], dtype=float, device=device)
+
         self.connect = self.var_dict["connect"]
         self.nfix = self.var_dict["nfix"]
         self.fixnodes = self.var_dict["fixnodes"]
         self.ndload = var_dict["ndload"]
         self.dloads = torch.tensor(self.var_dict["dloads"], device=device)
         print(self.dloads.shape)
+
 
         self.net = AssembleStiff(self.var_dict, self.elem_material)
 
@@ -124,6 +131,7 @@ class CreateNet(nn.Module):
         for i in range(self.ndload):
             lmn = int(self.dloads[i][0])
             face = int(self.dloads[i][1])
+
             a = self.connect[lmn][face]
             b = self.connect[lmn][pointer[face]]
             r = elresid(self.xcoord[a], self.ycoord[a], self.xcoord[b], self.ycoord[b], self.dloads[i][2],
@@ -151,6 +159,7 @@ class AssembleStiff(nn.Module):
         self.nnode = var_dict["nnode"]
         self.xcoord = torch.tensor([i[0] for i in var_dict["coord"]], dtype=float, device=device)
         self.ycoord = torch.tensor([i[1] for i in var_dict["coord"]], dtype=float, device=device)
+
         self.nelem = var_dict["nelem"]
         self.connect = var_dict["connect"]
 
@@ -177,6 +186,7 @@ class AssembleStiff(nn.Module):
 
     def forward(self):
         stiff = torch.zeros([2 * nnode, 2 * nnode], dtype=torch.float64, device=device)
+
         out = self.layers(stiff)
         return out
 
@@ -223,6 +233,7 @@ class SolverNet(nn.Module):
     def forward(self, x):
         stiff, resid = x.split(2 * nnode, 1)
         u = torch.zeros([2 * nnode, 1], dtype=torch.float64, device=device)
+
         r = resid - torch.mm(stiff, u)
 
         out = self.net(u, r, stiff)
@@ -256,6 +267,7 @@ class CustomModule(nn.Module):
         u = torch.reshape(u, (2 * nnode, 1, 1))
         r = torch.reshape(r, (2 * nnode, 1, 1))
         input = torch.zeros([2 * nnode, 2 * nnode, 2], dtype=torch.float64, device=device)
+
         input[:, 0, 0] = r[:, 0, 0]
         input[:, 1, 0] = u[:, 0, 0]
         input[:, 2, 0] = r[:, 0, 0]
@@ -283,6 +295,7 @@ class CustomLayer(nn.Module):
         r = r_new
 
         out = torch.zeros([2 * nnode, 2 * nnode, 2], dtype=torch.float64, device=device)
+
         out[:, 0, 0] = r[:, 0]
         out[:, 1, 0] = u[:, 0]
         out[:, 2, 0] = p[:, 0]
@@ -297,10 +310,12 @@ net = SolveAll(var_dict)
 u, uxcoord, uycoord, elem_material, sum = net()
 
 
+
 # ----------Plotting----------
 
 
 facecolors = np.zeros([nelem])
+
 
 for lmn in range(nelem):
     facecolors[lmn] = elem_material[lmn].detach().numpy()
@@ -312,6 +327,7 @@ triang_2 = mtri.Triangulation(uxcoord, uycoord, connect)
 plt.tripcolor(triang, ax, facecolors=np.zeros([nelem]), edgecolors='green', linewidth=2, cmap='Greys', alpha=0.5)
 plt.tripcolor(triang_2, ax, facecolors=facecolors, edgecolors='red', linewidth=2, cmap='Greys', alpha=0.5)
 print('a')
+
 plt.show()
 
 
@@ -372,6 +388,7 @@ for epoch in range(num_epochs):
     print('epoch =', epoch, '; sum =', sum[0, 0].detach().numpy(), '; loss =', loss_1[0, 0].detach().numpy(), '; alpha =', alpha[0, 0].detach().numpy())
 
     if epoch % 1 == 0:
+
         for lmn in range(nelem):
             facecolors[lmn] = material_1[lmn].detach().numpy()
 
@@ -385,9 +402,11 @@ for epoch in range(num_epochs):
     loss_old = loss_1
 
 
+
 u, uxcoord, uycoord, material_2, temp_2 = net()
 
 facecolors_2 = np.zeros([nelem])
+
 
 for lmn in range(nelem):
     if material_2[lmn] > 0.5:
@@ -401,3 +420,4 @@ triang_2 = mtri.Triangulation(uxcoord, uycoord, connect)
 plt.tripcolor(triang, ax, facecolors=facecolors_2, edgecolors='green', linewidth=2, cmap='Greys', alpha=0.5)
 plt.tripcolor(triang_2, ax, facecolors=facecolors_2, edgecolors='red', linewidth=2, cmap='Greys', alpha=0.5)
 plt.show()
+
